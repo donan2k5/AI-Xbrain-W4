@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+.DS_Store
+logs/
+*.db
+*.db-shm
+*.db-wal
+.claude/

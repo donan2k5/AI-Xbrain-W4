@@ -11,6 +11,7 @@ from app.models import (
     Citation,
     ModelTrace,
     RetrievalTrace,
+    ToolCallRecord,
     TraceRecord,
 )
 from app.traces import log_event, trace_store
@@ -64,99 +65,40 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "fetch_service_metrics",
-        "description": "Fetch real-time metrics for a specific service: p50/p95/p99 latency, error rate, requests/min, CPU/memory utilization.",
+        "description": "Fetch real-time metrics for a specific service (p50/p95/p99 latency, error rate, requests/min, CPU/memory). Use for current live data. For ALL services at once pass service_name='all'.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "service_name": {
                     "type": "string",
-                    "description": "Service name: PaymentGW, NotificationSvc, AuthSvc, OrderSvc, FraudDetector, InventorySvc, ReportingSvc",
+                    "description": "Service name: PaymentGW, NotificationSvc, AuthSvc, OrderSvc, FraudDetector, InventorySvc, ReportingSvc — or 'all' for all services",
                 }
             },
             "required": ["service_name"],
         },
     },
     {
-        "name": "fetch_all_services_metrics",
-        "description": "Fetch real-time metrics for all services at once.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
-    },
-    {
-        "name": "get_service_costs",
-        "description": "Get monthly costs for a specific service, optionally filtered by month (YYYY-MM).",
+        "name": "query_database",
+        "description": (
+            "Run a read-only SQL SELECT on the GeekBrain SQLite database. "
+            "Exact schema:\n"
+            "  monthly_costs(id, service, month, compute_cost, storage_cost, network_cost, third_party_cost, total_cost)\n"
+            "  incidents(incident_id, service, date, severity, duration_minutes, root_cause_summary, resolution, team_responsible, reported_by)\n"
+            "  sla_targets(id, service, metric, target, measurement_window)\n"
+            "  daily_metrics(id, date, service, latency_p99_ms, error_rate_percent, requests_per_minute, availability_percent)\n"
+            "Use for historical costs, incident records (counts, dates, severity, duration), SLA targets, and daily metric trends. "
+            "root_cause_summary is a one-line label only — for full root cause analysis, postmortem details, or WHY something happened, always use search_knowledge_base instead."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "service_name": {"type": "string", "description": "Service name"},
-                "month": {"type": "string", "description": "Month in YYYY-MM format, e.g. 2026-03"},
-            },
-            "required": ["service_name"],
-        },
-    },
-    {
-        "name": "get_all_costs",
-        "description": "Get monthly costs for all services, optionally filtered by month.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "month": {"type": "string", "description": "Month in YYYY-MM format"},
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "get_service_incidents",
-        "description": "Get brief incident records for a service (ID, date, severity, short description). Use for counting incidents or listing dates. Does NOT contain root cause analysis or postmortem detail — use search_knowledge_base for that.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "service_name": {"type": "string", "description": "Service name"},
-            },
-            "required": ["service_name"],
-        },
-    },
-    {
-        "name": "get_sla_targets",
-        "description": "Get SLA targets for one or all services.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "service_name": {"type": "string", "description": "Service name (omit for all services)"},
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "get_daily_metrics",
-        "description": "Get historical daily metrics for a service within a date range.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "service_name": {"type": "string", "description": "Service name"},
-                "date_from": {"type": "string", "description": "Start date YYYY-MM-DD"},
-                "date_to": {"type": "string", "description": "End date YYYY-MM-DD"},
-            },
-            "required": ["service_name"],
-        },
-    },
-    {
-        "name": "get_service_comparison",
-        "description": "Compare a metric across all services using the latest daily metrics.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "metric_name": {
+                "sql": {
                     "type": "string",
-                    "description": "One of: latency_p99_ms, latency_p95_ms, latency_p50_ms, error_rate_percent, requests_per_minute, availability_percent",
+                    "description": "A SELECT SQL statement to execute",
                 }
             },
-            "required": ["metric_name"],
+            "required": ["sql"],
         },
-    },
-    {
-        "name": "get_q1_costs_summary",
-        "description": "Get Q1 2026 (January–March) total and average costs aggregated by service.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
@@ -171,8 +113,7 @@ def _strip_frontmatter(text: str) -> str:
     return stripped
 
 
-def _make_tool_executor(adapter: BedrockAdapter, settings: Settings, citation_map: dict, chunk_list: list):
-    """Return a tool executor closure that tracks KB citation mapping."""
+def _make_tool_executor(adapter: BedrockAdapter, settings: Settings, citation_map: dict, chunk_list: list, tool_calls_log: list):
     citation_counter = [0]
 
     def execute_tool(tool_name: str, tool_input: dict) -> str:
@@ -180,6 +121,7 @@ def _make_tool_executor(adapter: BedrockAdapter, settings: Settings, citation_ma
             query = tool_input.get("query", "")
             chunks, _ = adapter.retrieve(query, settings.retrieval_top_k)
             if not chunks:
+                tool_calls_log.append(ToolCallRecord(tool_name=tool_name, params=f'"{query[:60]}"', result_hint="No documents found"))
                 return "No relevant documents found."
             chunks = adapter.rerank(query, chunks, settings.rerank_top_n)
             parts = []
@@ -188,41 +130,47 @@ def _make_tool_executor(adapter: BedrockAdapter, settings: Settings, citation_ma
                 idx = citation_counter[0]
                 citation_map[idx] = chunk
                 chunk_list.append(chunk)
-                excerpt = _strip_frontmatter(chunk.text).replace("\n", " ")
-                parts.append(f"[{idx}] {chunk.document}\n{excerpt}")
+                parts.append(f"[{idx}] {chunk.document}\n{_strip_frontmatter(chunk.text).replace(chr(10), ' ')}")
+            tool_calls_log.append(ToolCallRecord(
+                tool_name=tool_name,
+                params=f'"{query[:60]}"',
+                result_hint=f"{len(chunks)} chunks: {', '.join(dict.fromkeys(c.document for c in chunks))[:80]}",
+            ))
             return "\n\n".join(parts)
 
-        try:
-            if tool_name == "fetch_service_metrics":
-                result = tools_module.fetch_service_metrics(tool_input.get("service_name", ""))
-            elif tool_name == "fetch_all_services_metrics":
-                result = tools_module.fetch_all_services_metrics()
-            elif tool_name == "get_service_costs":
-                result = tools_module.get_service_costs(
-                    tool_input.get("service_name", ""),
-                    tool_input.get("month"),
-                )
-            elif tool_name == "get_all_costs":
-                result = tools_module.get_all_costs(tool_input.get("month"))
-            elif tool_name == "get_service_incidents":
-                result = tools_module.get_service_incidents(tool_input.get("service_name", ""))
-            elif tool_name == "get_sla_targets":
-                result = tools_module.get_sla_targets(tool_input.get("service_name"))
-            elif tool_name == "get_daily_metrics":
-                result = tools_module.get_daily_metrics(
-                    tool_input.get("service_name", ""),
-                    tool_input.get("date_from"),
-                    tool_input.get("date_to"),
-                )
-            elif tool_name == "get_service_comparison":
-                result = tools_module.get_service_comparison(tool_input.get("metric_name", "latency_p99_ms"))
-            elif tool_name == "get_q1_costs_summary":
-                result = tools_module.get_q1_costs_summary()
-            else:
-                return json.dumps({"error": f"Unknown tool: {tool_name}"})
-            return tools_module.format_for_llm(result)
-        except Exception as e:
-            return json.dumps({"error": f"Tool execution failed: {str(e)}"})
+        if tool_name == "fetch_service_metrics":
+            service = tool_input.get("service_name", "")
+            try:
+                if service.lower() == "all":
+                    result = tools_module.fetch_all_services_metrics()
+                    hint = f"all services fetched"
+                else:
+                    result = tools_module.fetch_service_metrics(service)
+                    d = result if isinstance(result, dict) else {}
+                    hint = f"p99={d.get('latency_p99_ms','?')}ms, error={d.get('error_rate_percent','?')}%, rpm={d.get('requests_per_minute','?')}"
+                formatted = tools_module.format_for_llm(result)
+                tool_calls_log.append(ToolCallRecord(tool_name=tool_name, params=f"service={service}", result_hint=hint))
+                return formatted
+            except Exception as e:
+                tool_calls_log.append(ToolCallRecord(tool_name=tool_name, params=f"service={service}", result_hint=f"ERROR: {e}"))
+                return json.dumps({"error": str(e)})
+
+        if tool_name == "query_database":
+            sql = tool_input.get("sql", "").strip()
+            if not sql.upper().startswith("SELECT"):
+                return json.dumps({"error": "Only SELECT queries allowed"})
+            try:
+                result = tools_module.query_database(sql)
+                formatted = tools_module.format_for_llm(result)
+                rows = result if isinstance(result, list) else []
+                hint = f"{len(rows)} rows" + (f": {json.dumps(rows[0])[:60]}" if rows else "")
+                tool_calls_log.append(ToolCallRecord(tool_name=tool_name, params=sql[:80], result_hint=hint))
+                return formatted
+            except Exception as e:
+                tool_calls_log.append(ToolCallRecord(tool_name=tool_name, params=sql[:80], result_hint=f"ERROR: {e}"))
+                return json.dumps({"error": str(e)})
+
+        return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
     return execute_tool
 
@@ -273,21 +221,38 @@ def _parse_agent_response(raw: str) -> tuple[str, str]:
     return thinking, answer
 
 
-def _citations_from_map(answer: str, citation_map: dict) -> list[Citation]:
-    """Extract inline [n] markers from answer and build Citation list."""
-    indices = {int(m) for m in re.findall(r'\[(\d+)\]', answer)}
-    seen: set[str] = set()
+def _citations_from_map(answer: str, citation_map: dict) -> tuple[str, list[Citation]]:
+    """Extract inline [n] markers, deduplicate by document, remap to sequential indices.
+
+    Returns (remapped_answer, citations) so displayed [1][2][3] always match sources list.
+    """
+    # Preserve first-appearance order of cited indices
+    cited_indices = list(dict.fromkeys(int(m) for m in re.findall(r'\[(\d+)\]', answer)))
+
+    doc_to_new: dict[str, int] = {}
+    old_to_new: dict[int, int] = {}
     citations: list[Citation] = []
-    for idx in sorted(indices):
-        chunk = citation_map.get(idx)
-        if chunk and chunk.document not in seen:
-            seen.add(chunk.document)
+
+    for old_idx in cited_indices:
+        chunk = citation_map.get(old_idx)
+        if not chunk:
+            continue
+        if chunk.document not in doc_to_new:
+            new_idx = len(doc_to_new) + 1
+            doc_to_new[chunk.document] = new_idx
             citations.append(Citation(
                 document=chunk.document,
                 uri=chunk.uri,
                 excerpt=chunk.text.strip().replace("\n", " ")[:240],
             ))
-    return citations
+        old_to_new[old_idx] = doc_to_new[chunk.document]
+
+    def _remap(m: re.Match) -> str:
+        new = old_to_new.get(int(m.group(1)))
+        return f"[{new}]" if new else ""
+
+    remapped_answer = re.sub(r'\[(\d+)\]', _remap, answer)
+    return remapped_answer, citations
 
 
 def _fallback_citations(chunk_list: list) -> list[Citation]:
@@ -333,7 +298,8 @@ def run_rag_chat(request: ChatRequest, settings: Settings, adapter: BedrockAdapt
     try:
         citation_map: dict[int, object] = {}
         chunk_list: list = []
-        tool_executor = _make_tool_executor(adapter, settings, citation_map, chunk_list)
+        tool_calls_log: list = []
+        tool_executor = _make_tool_executor(adapter, settings, citation_map, chunk_list, tool_calls_log)
 
         logs.append(log_event("agent_started", tools_available=len(TOOL_DEFINITIONS)))
         raw_answer, latency_ms = adapter.converse_with_tools(
@@ -347,12 +313,13 @@ def run_rag_chat(request: ChatRequest, settings: Settings, adapter: BedrockAdapt
 
         thinking, answer = _parse_agent_response(raw_answer)
 
-        citations = _citations_from_map(answer, citation_map)
+        answer, citations = _citations_from_map(answer, citation_map)
         if chunk_list and not citations:
             citations = _fallback_citations(chunk_list)
 
         record.answer = answer
         record.citations = citations
+        record.tool_calls = tool_calls_log
         if chunk_list:
             record.retrieval = RetrievalTrace(
                 knowledge_base_id=settings.bedrock_kb_id,

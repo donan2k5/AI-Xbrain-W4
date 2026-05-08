@@ -40,6 +40,12 @@ class RetrievalTrace(BaseModel):
     chunks: list[RetrievedChunk]
 
 
+class ToolCallRecord(BaseModel):
+    tool_name: str
+    params: str        # brief param summary, e.g. "service=PaymentGW"
+    result_hint: str   # brief result, e.g. "p99=185ms, error=0.08%"
+
+
 class ModelTrace(BaseModel):
     model_id: str
     prompt_policy: str
@@ -56,6 +62,7 @@ class TraceRecord(BaseModel):
     answer: str | None = None
     citations: list[Citation] = Field(default_factory=list)
     retrieval: RetrievalTrace | None = None
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     model: ModelTrace | None = None
     logs: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None

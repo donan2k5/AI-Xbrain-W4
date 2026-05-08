@@ -2,7 +2,7 @@ import { KeyboardEvent, useEffect, useRef, useMemo, useState, type ReactNode } f
 import ReactMarkdown from "react-markdown";
 import { fetchTrace, sendChat } from "./api";
 import { QUESTION_GROUPS } from "./data/questions";
-import type { ChatMessage, Citation, Level, Question, TraceRecord } from "./types";
+import type { ChatMessage, Citation, Level, Question, ToolCallRecord, TraceRecord } from "./types";
 
 function buildCiteMap(content: string, citations: Citation[]): Record<number, string> {
   const allNums = [...content.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1]));
@@ -367,75 +367,71 @@ function stripFrontmatter(text: string): string {
   return end !== -1 ? s.slice(end + 4).trimStart() : s;
 }
 
-function TraceContent({ trace }: { trace: TraceRecord }) {
-  const citedDocs = new Set(trace.citations.map(c => c.document));
-  const chunks = trace.retrieval?.chunks ?? [];
-  const maxScore = Math.max(...chunks.map(c => c.score ?? 0), 0.001);
+const TOOL_ICONS: Record<string, string> = {
+  search_knowledge_base: "📚",
+  fetch_service_metrics: "📡",
+  fetch_all_services_metrics: "📡",
+  get_service_costs: "💰",
+  get_all_costs: "💰",
+  get_q1_costs_summary: "💰",
+  get_service_incidents: "🚨",
+  get_sla_targets: "🎯",
+  get_daily_metrics: "📈",
+  get_service_comparison: "⚖️",
+};
 
-  // Build map: document → [n] citation numbers from answer text
-  const answerText = trace.answer ?? "";
-  const allNums = [...answerText.matchAll(/\[(\d+)\]/g)].map(m => parseInt(m[1]));
-  const uniqueSorted = [...new Set(allNums)].sort((a, b) => a - b);
-  const citationNumForDoc: Record<string, number[]> = {};
-  uniqueSorted.forEach((n, i) => {
-    const doc = trace.citations[i]?.document;
-    if (doc) citationNumForDoc[doc] = [...(citationNumForDoc[doc] ?? []), n];
-  });
+function ToolCallRow({ call }: { call: ToolCallRecord }) {
+  const icon = TOOL_ICONS[call.tool_name] ?? "🔧";
+  return (
+    <div className="tool-call-row">
+      <div className="tool-call-header">
+        <span className="tool-icon">{icon}</span>
+        <span className="tool-name">{call.tool_name}</span>
+      </div>
+      {call.params && <p className="tool-params">{call.params}</p>}
+      <p className="tool-result">{call.result_hint}</p>
+    </div>
+  );
+}
+
+function TraceContent({ trace }: { trace: TraceRecord }) {
+  const toolCalls = trace.tool_calls ?? [];
+  const kbCalls = toolCalls.filter(t => t.tool_name === "search_knowledge_base");
+  const dataCalls = toolCalls.filter(t => t.tool_name !== "search_knowledge_base");
+  const citedDocs = trace.citations;
 
   return (
     <div className="trace-content">
 
-      {/* ── Retrieval chunks ── */}
-      {chunks.length > 0 && (
+      {/* ── Tool calls (data tools) ── */}
+      {dataCalls.length > 0 && (
         <section className="trace-section">
-          <h3>Retrieved chunks ({chunks.length})</h3>
-          <div className="chunk-list">
-            {chunks.map((chunk, i) => {
-              const used = citedDocs.has(chunk.document);
-              const pct = Math.round(((chunk.score ?? 0) / maxScore) * 100);
-              return (
-                <div key={i} className={`chunk-row ${used ? "chunk-used" : "chunk-unused"}`}>
-                  <div className="chunk-header">
-                    <span className="chunk-doc">{chunk.document}</span>
-                    <span className={`chunk-badge ${used ? "badge-used" : "badge-skipped"}`}>
-                      {used
-                        ? (citationNumForDoc[chunk.document] ?? []).map(n => `[${n}]`).join("") || "cited"
-                        : "skipped"}
-                    </span>
-                  </div>
-                  {chunk.score != null && (
-                    <div className="chunk-score-row">
-                      <div className="chunk-score-bar">
-                        <div className="chunk-score-fill" style={{ width: `${pct}%`, opacity: used ? 1 : 0.45 }} />
-                      </div>
-                      <span className="chunk-score-val">{chunk.score.toFixed(3)}</span>
-                    </div>
-                  )}
-                  <p className="chunk-excerpt">{stripFrontmatter(chunk.text).slice(0, 200).replace(/\n/g, " ")}…</p>
-                </div>
-              );
-            })}
-          </div>
+          <h3>Tools called ({dataCalls.length})</h3>
+          {dataCalls.map((call, i) => <ToolCallRow key={i} call={call} />)}
         </section>
       )}
 
-      {/* ── Cited sources ── */}
+      {/* ── KB searches ── */}
+      {kbCalls.length > 0 && (
+        <section className="trace-section">
+          <h3>KB searches ({kbCalls.length})</h3>
+          {kbCalls.map((call, i) => <ToolCallRow key={i} call={call} />)}
+        </section>
+      )}
+
+      {/* ── Cited sources (document names only) ── */}
       <section className="trace-section">
-        <h3>Cited sources</h3>
-        {trace.citations.length === 0
-          ? <p className="trace-empty">No KB sources — answer came from live tools.</p>
-          : trace.citations.map((c) => (
-            <div className="source-row" key={`${c.document}-${c.uri ?? ""}`}>
-              <p><strong>{c.document}</strong></p>
+        <h3>Sources cited</h3>
+        {citedDocs.length === 0
+          ? <p className="trace-empty">No KB sources — answer from live tools.</p>
+          : citedDocs.map((c, i) => (
+            <div className="source-row" key={`${c.document}-${i}`}>
+              <span className="source-index">[{i + 1}]</span>
+              <strong>{c.document}</strong>
             </div>
           ))}
       </section>
 
-      {/* ── Logs ── */}
-      <section className="trace-section">
-        <h3>Logs</h3>
-        <pre>{JSON.stringify(trace.logs, null, 2)}</pre>
-      </section>
     </div>
   );
 }

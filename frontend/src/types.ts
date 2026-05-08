@@ -51,6 +51,12 @@ export type RetrievalTrace = {
   chunks: RetrievedChunk[];
 };
 
+export type ToolCallRecord = {
+  tool_name: string;
+  params: string;
+  result_hint: string;
+};
+
 export type TraceRecord = {
   trace_id: string;
   request_id: string;
@@ -61,6 +67,7 @@ export type TraceRecord = {
   answer?: string | null;
   citations: Citation[];
   retrieval?: RetrievalTrace | null;
+  tool_calls?: ToolCallRecord[];
   logs: Array<Record<string, unknown>>;
   error?: string | null;
 };

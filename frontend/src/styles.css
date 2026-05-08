@@ -775,6 +775,58 @@ h3 {
   font-style: italic;
 }
 
+/* ── Tool call rows in trace panel ── */
+.tool-call-row {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: rgba(255,255,255,0.5);
+  font-size: 11px;
+}
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.tool-icon { font-size: 13px; }
+
+.tool-name {
+  font-weight: 700;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.tool-params {
+  margin: 0 0 3px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-family: 'Monaco', 'Menlo', monospace;
+}
+
+.tool-result {
+  margin: 0;
+  color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.source-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.source-index {
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
 /* ── Chunk list in trace panel ── */
 .chunk-list {
   display: flex;
@@ -885,20 +937,18 @@ h3 {
 }
 
 .source-row {
-  margin-bottom: 8px;
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(37, 99, 235, 0.1);
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(37, 99, 235, 0.08);
+  font-size: 11px;
+  color: var(--text);
 }
 
 .source-row:last-child {
   border-bottom: none;
 }
 
-.source-row p {
-  margin: 0;
-  font-size: 11px;
+.source-row strong {
   color: var(--primary);
-  font-weight: 600;
 }
 
 pre {

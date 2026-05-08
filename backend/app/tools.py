@@ -5,16 +5,17 @@ L3 Tools: Query monitoring API and SQLite for real-time & historical data
 import json
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 
 # Monitoring API endpoints
-MONITORING_API_BASE = "http://localhost:8000"
+MONITORING_API_BASE = "http://localhost:8001"
 
 # SQLite database path
-SQLITE_PATH = "geekbrain.db"
+SQLITE_PATH = str(Path(__file__).parent.parent.parent.parent / "AI-XBrain-Week4/xbrain-learners/W4/data_package/scripts/geekbrain.db")
 
 
 def fetch_service_metrics(service_name: str) -> dict[str, Any]:

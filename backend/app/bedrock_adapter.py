@@ -63,7 +63,7 @@ class BedrockAdapter:
         if not chunks:
             return chunks
         try:
-            model_arn = f"arn:aws:bedrock:{self.settings.aws_region}::foundation-model/amazon.rerank-v1:0"
+            model_arn = f"arn:aws:bedrock:{self.settings.aws_region}::foundation-model/cohere.rerank-v3-5:0"
             response = self.agent_runtime.rerank(
                 rerankingConfiguration={
                     "type": "BEDROCK_RERANKING_MODEL",
@@ -82,13 +82,18 @@ class BedrockAdapter:
                     }
                     for chunk in chunks
                 ],
-                textQuery={"text": query},
+                queries=[{"type": "TEXT", "textQuery": {"text": query}}],
             )
             reranked = []
-            for item in response.get("rerankingResults", []):
+            results = response.get("rerankingResults", [])
+            if results:
+                logger.debug("rerank result sample keys: %s", list(results[0].keys()))
+            for item in results:
                 idx = item.get("index")
                 if idx is not None and 0 <= idx < len(chunks):
-                    reranked.append(chunks[idx])
+                    rerank_score = item.get("relevanceScore") or item.get("score") or item.get("relevance_score")
+                    chunk = chunks[idx].model_copy(update={"rerank_score": rerank_score})
+                    reranked.append(chunk)
             return reranked if reranked else chunks[:top_n]
         except Exception as e:
             logger.warning("rerank failed, using original order: %s", e)
@@ -146,20 +151,41 @@ class BedrockAdapter:
         answer_parts = [part.get("text", "") for part in content if part.get("text")]
         return "\n".join(answer_parts).strip(), latency_ms
 
+    @staticmethod
+    def _extract_thinking(content: list) -> str:
+        """Extract thinking text from content blocks. Handles both Bedrock reasoningContent and Anthropic thinking formats."""
+        parts = []
+        for part in content:
+            # Bedrock Converse format
+            if rc := part.get("reasoningContent"):
+                if rt := rc.get("reasoningText"):
+                    parts.append(rt.get("text", ""))
+            # Anthropic-style format via additionalModelRequestFields
+            elif th := part.get("thinking"):
+                if isinstance(th, dict):
+                    parts.append(th.get("thinking", ""))
+                elif isinstance(th, str):
+                    parts.append(th)
+        return "\n\n".join(p for p in parts if p)
+
     def converse_with_tools(
         self, system_prompt: str, user_prompt: str, tools: list[dict[str, Any]] | None = None, tool_executor: Any = None
-    ) -> tuple[str, int]:
-        """Converse with tool use support. tool_executor is a callable that takes (tool_name, tool_input) and returns result."""
+    ) -> tuple[str, str, int]:
+        """Converse with tool use + extended thinking. Returns (answer, thinking, latency_ms)."""
         start = time.perf_counter()
         messages = [{"role": "user", "content": [{"text": user_prompt}]}]
+        all_thinking: list[str] = []
 
         converse_args = {
             "modelId": self.settings.bedrock_model_id,
             "system": [{"text": system_prompt}],
             "messages": messages,
             "inferenceConfig": {
-                "temperature": 0,
-                "maxTokens": 4000,
+                "temperature": 1,
+                "maxTokens": 6000,
+            },
+            "additionalModelRequestFields": {
+                "thinking": {"type": "enabled", "budget_tokens": 2000}
             },
         }
 
@@ -172,15 +198,20 @@ class BedrockAdapter:
 
             content = response["output"]["message"].get("content", [])
 
+            # Collect thinking from this turn
+            turn_thinking = self._extract_thinking(content)
+            if turn_thinking:
+                all_thinking.append(turn_thinking)
+
             # Check for tool use — must check BEFORE returning text, because
-            # Claude can emit both text (thinking) AND toolUse in the same turn.
+            # Claude can emit thinking AND toolUse in the same turn.
             tool_uses = [part for part in content if part.get("toolUse")]
             if not tool_uses or not tool_executor:
-                # No tool calls: this is the final answer
                 answer_parts = [part.get("text", "") for part in content if part.get("text")]
-                return "\n".join(answer_parts).strip(), latency_ms
+                thinking_text = "\n\n".join(all_thinking)
+                return "\n".join(answer_parts).strip(), thinking_text, latency_ms
 
-            # Add assistant message with tool uses to conversation
+            # Must pass full content back (including thinking blocks) — Bedrock requirement
             messages.append({"role": "assistant", "content": content})
 
             # Execute tools and collect results

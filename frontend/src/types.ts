@@ -40,6 +40,7 @@ export type RetrievedChunk = {
   document: string;
   text: string;
   score?: number | null;
+  rerank_score?: number | null;
   uri?: string | null;
   location?: Record<string, unknown> | null;
   metadata?: Record<string, unknown>;

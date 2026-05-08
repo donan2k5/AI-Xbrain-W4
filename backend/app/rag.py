@@ -28,24 +28,20 @@ AGENT_SYSTEM_PROMPT = """You are an intelligent assistant for the GeekBrain plat
 
 For every question:
 - Decide what information you need and call the right tool(s). You may call multiple tools.
-- When search_knowledge_base returns results, each chunk is labeled [1], [2], etc. Use those same numbers as inline citations in your ANSWER.
+- When search_knowledge_base returns results, each chunk is labeled [1], [2], etc. Use those same numbers as inline citations in your answer.
 - For real-time/database tool results, no inline citation needed — just reference the data directly.
 - When a document makes a general statement AND lists specific items, prioritize the specific items in your answer over the general statement.
+- For ANY question about a specific incident or outage (root cause, timeline, what happened, why, resolution, action items): use ONLY search_knowledge_base. Never query the database for incident-specific questions.
 
-Always respond in this exact format:
-
-THINKING:
-[Your reasoning: what the question is asking, which tools you chose and why, what the results tell you]
-
-ANSWER:
-[Start immediately with the fact — never open with "The search returned", "I found", "Based on", or any meta-commentary. 1-2 sentences of prose. No bullets, no numbered lists, no headers. For sequences use "→".
-Cite ALL sources that contributed — list every relevant [n] at the end of the sentence.
+Start immediately with the fact — never open with "The search returned", "I found", "Based on", or any meta-commentary. 1-2 sentences of prose. No bullets, no numbered lists, no headers. For sequences use "→". Cite ALL sources that contributed — list every relevant [n] at the end of the sentence.
 
 Good examples:
 - "The rate limit is 1,000 requests per minute per merchant API key [1][2]."
 - "Yes — the freeze (Fri 18:00–Mon 08:00) can be overridden for P1 hotfixes with VP Engineering Mark Sullivan approval [1][3]."
 - "PaymentGW and OrderSvc are the explicitly documented direct dependencies of AuthSvc [2][4]; a full AuthSvc outage would affect the entire platform since all services rely on it for token validation [1]."
-- "AuthSvc is written in Go [1]."]"""
+- "AuthSvc is written in Go [1]."
+
+Output only the answer — no section headers, no preamble."""
 
 
 TOOL_DEFINITIONS = [
@@ -86,8 +82,9 @@ TOOL_DEFINITIONS = [
             "  incidents(incident_id, service, date, severity, duration_minutes, root_cause_summary, resolution, team_responsible, reported_by)\n"
             "  sla_targets(id, service, metric, target, measurement_window)\n"
             "  daily_metrics(id, date, service, latency_p99_ms, error_rate_percent, requests_per_minute, availability_percent)\n"
-            "Use for historical costs, incident records (counts, dates, severity, duration), SLA targets, and daily metric trends. "
-            "root_cause_summary is a one-line label only — for full root cause analysis, postmortem details, or WHY something happened, always use search_knowledge_base instead."
+            "Use ONLY for: monthly costs, SLA targets, and daily metric trends. "
+            "Do NOT use for any question about a specific incident or outage — use search_knowledge_base for all incident questions including basic details, root cause, timeline, or resolution. "
+            "The incidents table exists only for aggregate stats (e.g. COUNT of incidents per service); never query it to answer 'what happened' or 'why'."
         ),
         "inputSchema": {
             "type": "object",
@@ -175,50 +172,18 @@ def _make_tool_executor(adapter: BedrockAdapter, settings: Settings, citation_ma
     return execute_tool
 
 
-_THINKING_PREAMBLE = re.compile(
+_META_PREAMBLE = re.compile(
     r'^(the search|i found|i can see|based on|looking at|from the|according to the search)',
     re.I
 )
 
 
-def _parse_agent_response(raw: str) -> tuple[str, str]:
-    """Parse THINKING and ANSWER blocks from agent response."""
-    thinking_lines: list[str] = []
-    answer_lines: list[str] = []
-    section = "thinking"  # default to thinking so preamble before THINKING: goes there too
-
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if stripped.upper().startswith("THINKING:"):
-            section = "thinking"
-            rest = stripped[len("THINKING:"):].strip()
-            if rest:
-                thinking_lines.append(rest)
-        elif stripped.upper().startswith("ANSWER:"):
-            section = "answer"
-            rest = stripped[len("ANSWER:"):].strip()
-            if rest:
-                answer_lines.append(rest)
-        elif section == "thinking" and stripped:
-            thinking_lines.append(stripped)
-        elif section == "answer" and stripped:
-            answer_lines.append(stripped)
-
-    thinking = "\n".join(thinking_lines).strip()
-    answer = "\n".join(answer_lines).strip()
-
-    # Strip leading reasoning sentences that leaked into the answer block:
-    # if the first line looks like meta-commentary and has no citation, move it to thinking.
-    if answer:
-        lines = answer.splitlines()
-        while lines and _THINKING_PREAMBLE.match(lines[0]) and not re.search(r'\[\d+\]', lines[0]):
-            thinking_lines.append(lines.pop(0))
-        answer = "\n".join(lines).strip()
-        thinking = "\n".join(thinking_lines).strip()
-
-    if not answer:
-        answer = raw.strip()
-    return thinking, answer
+def _clean_answer(raw: str) -> str:
+    """Strip any meta-commentary preamble lines that don't contain citations."""
+    lines = raw.strip().splitlines()
+    while lines and _META_PREAMBLE.match(lines[0].strip()) and not re.search(r'\[\d+\]', lines[0]):
+        lines.pop(0)
+    return "\n".join(lines).strip() or raw.strip()
 
 
 def _citations_from_map(answer: str, citation_map: dict) -> tuple[str, list[Citation]]:
@@ -302,7 +267,7 @@ def run_rag_chat(request: ChatRequest, settings: Settings, adapter: BedrockAdapt
         tool_executor = _make_tool_executor(adapter, settings, citation_map, chunk_list, tool_calls_log)
 
         logs.append(log_event("agent_started", tools_available=len(TOOL_DEFINITIONS)))
-        raw_answer, latency_ms = adapter.converse_with_tools(
+        raw_answer, thinking, latency_ms = adapter.converse_with_tools(
             AGENT_SYSTEM_PROMPT,
             request.message,
             tools=TOOL_DEFINITIONS,
@@ -311,7 +276,7 @@ def run_rag_chat(request: ChatRequest, settings: Settings, adapter: BedrockAdapt
         logs.append(log_event("agent_finished", latency_ms=latency_ms))
         logger.info("agent finished trace_id=%s level=%s latency_ms=%s", trace_id, level, latency_ms)
 
-        thinking, answer = _parse_agent_response(raw_answer)
+        answer = _clean_answer(raw_answer)
 
         answer, citations = _citations_from_map(answer, citation_map)
         if chunk_list and not citations:

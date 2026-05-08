@@ -72,7 +72,9 @@ function processChildren(children: ReactNode, citeMap: Record<number, string>): 
   return children;
 }
 
-const newId = () => crypto.randomUUID();
+const newId = () =>
+  crypto.randomUUID?.() ??
+  Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 function inferLevel(questionId?: string, fallback?: Level): Level {
   if (fallback) return fallback;
@@ -394,11 +396,20 @@ function ToolCallRow({ call }: { call: ToolCallRecord }) {
   );
 }
 
+function ScoreBadge({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <span className="score-badge" style={{ background: color }}>
+      {label} {value.toFixed(3)}
+    </span>
+  );
+}
+
 function TraceContent({ trace }: { trace: TraceRecord }) {
   const toolCalls = trace.tool_calls ?? [];
   const kbCalls = toolCalls.filter(t => t.tool_name === "search_knowledge_base");
   const dataCalls = toolCalls.filter(t => t.tool_name !== "search_knowledge_base");
   const citedDocs = trace.citations;
+  const chunks = trace.retrieval?.chunks ?? [];
 
   return (
     <div className="trace-content">
@@ -419,7 +430,32 @@ function TraceContent({ trace }: { trace: TraceRecord }) {
         </section>
       )}
 
-      {/* ── Cited sources (document names only) ── */}
+      {/* ── Retrieved chunks with scores ── */}
+      {chunks.length > 0 && (
+        <section className="trace-section">
+          <h3>Retrieved chunks ({chunks.length}) — sorted by rerank</h3>
+          <p className="trace-hint">Higher rerank score = more relevant to query</p>
+          {chunks.map((chunk, i) => (
+            <div className="chunk-row" key={i}>
+              <div className="chunk-header">
+                <span className="chunk-rank">#{i + 1}</span>
+                <strong className="chunk-doc">{chunk.document}</strong>
+                <div className="chunk-scores">
+                  {chunk.rerank_score != null && (
+                    <ScoreBadge label="rerank" value={chunk.rerank_score} color="var(--score-rerank)" />
+                  )}
+                  {chunk.score != null && (
+                    <ScoreBadge label="vector" value={chunk.score} color="var(--score-vector)" />
+                  )}
+                </div>
+              </div>
+              <p className="chunk-excerpt">{stripFrontmatter(chunk.text).slice(0, 180)}…</p>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {/* ── Cited sources ── */}
       <section className="trace-section">
         <h3>Sources cited</h3>
         {citedDocs.length === 0

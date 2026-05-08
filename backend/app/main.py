@@ -1,7 +1,10 @@
 import logging
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.bedrock_adapter import BedrockAdapter
 from app.config import Settings, get_settings
@@ -13,11 +16,10 @@ app = FastAPI(title="AI-XBrain RAG API", version="0.1.0")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("ai_xbrain")
 
-settings_for_cors = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings_for_cors.cors_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -64,3 +66,13 @@ def get_trace(trace_id: str) -> TraceRecord:
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
     return trace
+
+
+# Serve frontend static files — must be registered last
+_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
+if _DIST.exists():
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa(full_path: str) -> FileResponse:
+        return FileResponse(_DIST / "index.html")

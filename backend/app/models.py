@@ -28,7 +28,8 @@ class ChatResponse(BaseModel):
 class RetrievedChunk(BaseModel):
     document: str
     text: str
-    score: float | None = None
+    score: float | None = None       # vector search score from KB retrieve()
+    rerank_score: float | None = None  # cross-encoder score from Bedrock Rerank
     uri: str | None = None
     location: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

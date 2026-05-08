@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     aws_disable_proxy: bool = True
     bedrock_kb_id: str = ""
     bedrock_model_id: str = "us.anthropic.claude-sonnet-4-20250514-v1:0"
-    retrieval_top_k: int = 10
+    retrieval_top_k: int = 15
     rerank_top_n: int = 10
     allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
